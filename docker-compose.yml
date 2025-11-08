@@ -1,0 +1,24 @@
+version: '3.8'
+
+services:
+  # Nuestro nuevo servicio de API en Python
+  api:
+    build: .
+    ports:
+      # Exponemos el puerto 8080 de nuestra PC
+      # al puerto 8080 del contenedor
+      # (Usamos 8080 para no chocar con el 8000 de Nginx/PHP)
+      - "8080:8080"
+    volumes:
+      # Sincronizamos el código para desarrollo en vivo
+      - .:/app
+    
+    # Carga las variables del archivo .env
+    env_file:
+      - .env
+      
+    # ¡LA MAGIA!
+    # Esto añade "host.docker.internal" al DNS del contenedor
+    # y lo apunta a la puerta de enlace del host.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
