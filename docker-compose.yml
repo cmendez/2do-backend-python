@@ -9,9 +9,9 @@ services:
       # al puerto 8080 del contenedor
       # (Usamos 8080 para no chocar con el 8000 de Nginx/PHP)
       - "8080:8080"
-    volumes:
+    #volumes:
       # Sincronizamos el código para desarrollo en vivo
-      - .:/app
+    #  - .:/app
     
     # Carga las variables del archivo .env
     env_file:

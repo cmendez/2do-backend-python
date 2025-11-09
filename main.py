@@ -1,5 +1,5 @@
 import os
-from fastapi import FastAPI, Depends, HTTPException, status
+from fastapi import FastAPI, Depends, HTTPException, status, Header
 from pydantic import BaseModel
 from typing import List, Optional
 
@@ -13,6 +13,9 @@ from datetime import datetime, timedelta, timezone
 from jose import JWTError, jwt
 from passlib.context import CryptContext
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+
+# NUEVO: Importa el Middleware de CORS
+from fastapi.middleware.cors import CORSMiddleware
 
 # --- 1. CONFIGURACIÓN DE BASE DE DATOS (Sin cambios) ---
 
@@ -85,12 +88,25 @@ class ArticleResponse(BaseModel):
     body: Optional[str] = None
     
     class Config:
-        orm_mode = True
+        from_attributes = True
 
 
 # --- 3. INICIALIZACIÓN DE FASTAPI (Sin cambios) ---
 app = FastAPI(title="API de Artículos (Python)")
 
+# --- NUEVO: AÑADIR MIDDLEWARE DE CORS ---
+# Define de dónde permitimos peticiones (tu app de Angular)
+origins = [
+    "http://localhost:4200",
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"], # Permite todos los métodos (GET, POST, etc.)
+    allow_headers=["*"], # Permite todas las cabeceras (incluyendo Authorization)
+)
 
 # --- 4. DEPENDENCIA DE SESIÓN (Sin cambios) ---
 def get_db():
@@ -106,11 +122,13 @@ def verify_password(plain_password, hashed_password):
     """Verifica la contraseña contra el hash de la BD"""
     return pwd_context.verify(plain_password, hashed_password)
 
-def get_user_by_username(db: Session, username: str):
-    """Busca un usuario en la BD por su username"""
-    # Asumimos que tu app RealWorld usa email para login
-    # ¡Ajusta esto si usa 'username'!
-    return db.query(UserTable).filter(UserTable.email == username).first()
+def get_user_by_sub(db: Session, sub_value: str):
+    """Busca un usuario en la BD por el valor del 'sub' (que es el username)"""
+    return db.query(UserTable).filter(UserTable.username == sub_value).first()
+
+def get_user_by_email(db: Session, email: str):
+    """Busca un usuario en la BD por su email"""
+    return db.query(UserTable).filter(UserTable.email == email).first()
 
 def create_access_token(data: dict, expires_delta: timedelta | None = None):
     """Crea un nuevo token JWT"""
@@ -131,6 +149,10 @@ async def get_current_user(token: str = Depends(oauth2_scheme), db: Session = De
     Decodifica el token, valida al usuario y lo devuelve.
     Si algo falla, lanza una excepción HTTP 401.
     """
+    
+    print("\n--- DEBUG: INICIO DE get_current_user ---", flush=True)
+    print(f"DEBUG: Token recibido: {token[:20]}...", flush=True)
+    
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="No se pudieron validar las credenciales",
@@ -138,23 +160,58 @@ async def get_current_user(token: str = Depends(oauth2_scheme), db: Session = De
     )
     
     try:
-        # Decodifica el token
         payload = jwt.decode(token, JWT_SECRET_KEY, algorithms=[ALGORITHM])
-        username: str = payload.get("sub") # Asumimos que guardamos el user en "sub"
+        print(f"DEBUG: Payload decodificado: {payload}", flush=True)
+        
+        username: str = payload.get("sub")
         if username is None:
+            print("DEBUG: ¡Error! 'sub' no está en el payload.", flush=True)
             raise credentials_exception
-        token_data = TokenData(username=username)
-    except JWTError:
+        
+        print(f"DEBUG: Buscando en BD con sub: {username}", flush=True)
+        
+    except JWTError as e:
+        print(f"DEBUG: ¡Error! JWT.decode falló. ¿Clave secreta incorrecta? {e}", flush=True)
         raise credentials_exception
     
-    # Busca al usuario en la BD
-    user = get_user_by_username(db, username=token_data.username)
+    user = get_user_by_sub(db, sub_value=username)
+    print(f"DEBUG: Resultado de la BD: {user}", flush=True)
+    
     if user is None:
+        print("DEBUG: ¡Error! Usuario no encontrado en la BD.", flush=True)
         raise credentials_exception
     
-    # Devuelve el objeto User de la BD
+    print(f"DEBUG: Usuario autenticado: {user.username}", flush=True)
+    print("--- DEBUG: FIN DE get_current_user ---\n", flush=True)
     return user
 
+async def get_current_user_optional(
+    authorization: Optional[str] = Header(None), 
+    db: Session = Depends(get_db)
+) -> Optional[UserTable]:
+    
+    if authorization is None:
+        return None
+    
+    token_parts = authorization.split(" ")
+    if len(token_parts) != 2 or token_parts[0] != "Bearer":
+        return None
+    
+    # ¡¡ESTA ES LA LÍNEA QUE FALTABA!!
+    token = token_parts[1]
+    
+    try:
+        # Ahora 'token' sí existe
+        payload = jwt.decode(token, JWT_SECRET_KEY, algorithms=[ALGORITHM])
+        username: str = payload.get("sub")
+        if username is None:
+            return None
+        
+        user = get_user_by_sub(db, sub_value=username)
+        return user 
+    
+    except JWTError:
+        return None
 
 # --- 5. ENDPOINTS ---
 
@@ -168,9 +225,8 @@ async def login_for_access_token(
     Recibe un email (en campo 'username') y 'password'
     Valida al usuario y devuelve un token JWT.
     """
-    # 1. Busca al usuario
-    # (El spec de RealWorld usa email como username en el login)
-    user = get_user_by_username(db, username=form_data.username)
+    # 1. Busca al usuario POR EMAIL (usando la nueva función)
+    user = get_user_by_email(db, email=form_data.username) # form_data.username ES el email
     
     # 2. Valida la contraseña
     if not user or not verify_password(form_data.password, user.password):
@@ -183,26 +239,31 @@ async def login_for_access_token(
     # 3. Crea el token
     access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     access_token = create_access_token(
-        data={"sub": user.email}, # Guardamos el email en el payload
+        # ¡IMPORTANTE! Pone el USERNAME en el sub (para coincidir con PHP)
+        data={"sub": user.username}, 
         expires_delta=access_token_expires
     )
     
     # 4. Devuelve el token
     return {"access_token": access_token, "token_type": "bearer"}
 
+# --- RUTA DE PRUEBA DE SANIDAD ---
+@app.get("/api/hello")
+def get_hello():
+    return {"message": "¡El código SÍ se actualizó!"}
+# --- FIN DE RUTA DE PRUEBA ---
 
 # --- ENDPOINT DE ARTÍCULOS (AHORA PROTEGIDO) ---
 @app.get("/api/articles", response_model=List[ArticleResponse])
 def get_all_articles(
     db: Session = Depends(get_db),
-    # NUEVO: Esta dependencia protege el endpoint
-    current_user: UserTable = Depends(get_current_user) 
+    current_user: UserTable = Depends(get_current_user) # Correcto
 ):
     """
-    Endpoint para LEER todos los artículos.
-    Ahora solo funciona si se provee un Token Bearer válido.
+    Endpoint PROTEGIDO para LEER todos los artículos.
     """
-    print(f"¡Petición recibida de un usuario autenticado: {current_user.email}!")
+    # Ya sabemos que el usuario existe, si no, habría fallado con 401.
+    print(f"¡Petición recibida de un usuario autenticado: {current_user.email}!", flush=True)
     
     articles = db.query(ArticleTable).all()
     return articles
