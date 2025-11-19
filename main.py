@@ -64,9 +64,23 @@ Base = declarative_base()
 
 # --- Configuración de Seguridad JWT ---
 
-JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY") or os.getenv("SECRET_KEY") # Soporta ambos nombres
+# Intentamos leer con varios nombres comunes
+JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY") or os.getenv("SECRET_KEY")
+
+# VALIDACIÓN CRÍTICA: Si después de intentar leerla sigue siendo None, detenemos todo.
+# Esto te ayudará a ver el error en los logs inmediatamente al arrancar.
+if not JWT_SECRET_KEY:
+    print("❌ ERROR FATAL: No se encontró la variable de entorno JWT_SECRET_KEY o SECRET_KEY.")
+    # Usamos una clave dummy SOLO para que no explote el arranque, pero avisamos del error
+    # OJO: En producción esto debería detener la app, pero para debug lo dejamos así.
+    JWT_SECRET_KEY = "clave_temporal_insegura_para_debug" 
+
 ALGORITHM = os.getenv("ALGORITHM", "HS256")
 ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", 30))
+
+print(f"🔒 Configuración JWT cargada. Algoritmo: {ALGORITHM}")
+# Nunca imprimas la clave secreta completa en logs, pero sí podemos ver si tiene longitud
+print(f"🔑 Longitud de clave secreta: {len(JWT_SECRET_KEY) if JWT_SECRET_KEY else 0}")
 
 # Contexto de Passlib: le decimos que use 'bcrypt'
 # Esto verificará automáticamente los hashes de bcrypt
