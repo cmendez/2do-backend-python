@@ -8,33 +8,63 @@ from sqlalchemy import create_engine, Column, Integer, String, Text
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
 
-# --- NUEVO: Importaciones para JWT y Seguridad ---
+# --- JWT y Seguridad ---
 from datetime import datetime, timedelta, timezone
 from jose import JWTError, jwt
 from passlib.context import CryptContext
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 
-# NUEVO: Importa el Middleware de CORS
+# Middleware de CORS
 from fastapi.middleware.cors import CORSMiddleware
 
-# --- 1. CONFIGURACIÓN DE BASE DE DATOS (Sin cambios) ---
+# ==============================================================================
+# --- 1. CONFIGURACIÓN DE BASE DE DATOS (CORREGIDA PARA RENDER/TiDB) ---
+# ==============================================================================
 
-DB_USER = os.getenv("DB_USERNAME")
+# Leemos las variables de entorno. 
+# Usamos 'get' sin valor por defecto para obligar a usar las de Render.
+DB_USER = os.getenv("DB_USERNAME") or os.getenv("DB_USER")
 DB_PASS = os.getenv("DB_PASSWORD")
-DB_NAME = os.getenv("DB_DATABASE")
-DB_HOST = "host.docker.internal"
-DB_PORT = 33066
+DB_NAME = os.getenv("DB_DATABASE") or os.getenv("DB_NAME")
+DB_HOST = os.getenv("DB_HOST") # Antes tenías "host.docker.internal"
+DB_PORT = os.getenv("DB_PORT") # Antes tenías 33066
+
+# --- DEBUGGING: Verificamos en logs qué está leyendo Python ---
+print(f"\n--- INICIANDO CONEXIÓN A BASE DE DATOS ---")
+print(f"DB_HOST: {DB_HOST}")
+print(f"DB_PORT: {DB_PORT}")
+print(f"DB_USER: {DB_USER}")
+# -------------------------------------------------------------
+
+# Construcción de la URL de conexión
 DATABASE_URL = f"mysql+pymysql://{DB_USER}:{DB_PASS}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
 
-engine = create_engine(DATABASE_URL)
+# --- CONFIGURACIÓN SSL (VITAL PARA TIDB) ---
+connect_args = {}
+
+# Detectamos si estamos usando TiDB (o si estamos en Producción) para inyectar el certificado
+if DB_HOST and ("tidb" in DB_HOST or "aws" in DB_HOST):
+    print("🔒 Detectado TiDB/Cloud: Activando modo SSL seguro...")
+    connect_args = {
+        "ssl": {
+            "ca": "/etc/ssl/certs/ca-certificates.crt"
+        }
+    }
+
+# Creación del motor con opciones de reconexión (pool_pre_ping)
+engine = create_engine(
+    DATABASE_URL, 
+    connect_args=connect_args,
+    pool_pre_ping=True 
+)
+
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
 
-# --- NUEVO: Configuración de Seguridad JWT ---
+# --- Configuración de Seguridad JWT ---
 
-# Leemos las variables del .env
-JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY")
+JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY") or os.getenv("SECRET_KEY") # Soporta ambos nombres
 ALGORITHM = os.getenv("ALGORITHM", "HS256")
 ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", 30))
 
@@ -47,7 +77,9 @@ pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/users/login")
 
 
+# ==============================================================================
 # --- 2. MODELOS (Definición de Datos) ---
+# ==============================================================================
 
 # Modelo ORM para 'articles' (Sin cambios)
 class ArticleTable(Base):
@@ -65,10 +97,10 @@ class UserTable(Base):
     id = Column(Integer, primary_key=True, index=True)
     username = Column(String(255), unique=True, index=True)
     email = Column(String(255), unique=True, index=True)
-    password = Column(String(255)) # Asumimos que esta columna guarda el hash
+    password = Column(String(255)) 
 
 
-# --- NUEVO: Schemas Pydantic para Autenticación ---
+# --- Schemas Pydantic ---
 
 # El JSON que devolveremos en el login
 class Token(BaseModel):
@@ -91,14 +123,25 @@ class ArticleResponse(BaseModel):
         from_attributes = True
 
 
-# --- 3. INICIALIZACIÓN DE FASTAPI (Sin cambios) ---
+# ==============================================================================
+# --- 3. INICIALIZACIÓN DE FASTAPI Y CORS ---
+# ==============================================================================
 app = FastAPI(title="API de Artículos (Python)")
 
-# --- NUEVO: AÑADIR MIDDLEWARE DE CORS ---
-# Define de dónde permitimos peticiones (tu app de Angular)
+# Configuración CORS Flexible para la Demo
 origins = [
     "http://localhost:4200",
+    "https://upch-slim-php-realworld.onrender.com", # Tu backend PHP (opcional)
+    "*" # PERMITIR TODO (Para evitar bloqueos en la demo con Vercel)
 ]
+
+# Si configuraste la variable en Render, úsala, si no, usa la lista de arriba
+cors_env = os.getenv("CORS_ALLOWED_ORIGINS")
+if cors_env:
+    if cors_env == "*":
+        origins = ["*"]
+    else:
+        origins = cors_env.split(",")
 
 app.add_middleware(
     CORSMiddleware,
@@ -108,7 +151,11 @@ app.add_middleware(
     allow_headers=["*"], # Permite todas las cabeceras (incluyendo Authorization)
 )
 
-# --- 4. DEPENDENCIA DE SESIÓN (Sin cambios) ---
+
+# ==============================================================================
+# --- 4. DEPENDENCIAS Y UTILIDADES ---
+# ==============================================================================
+
 def get_db():
     db = SessionLocal()
     try:
@@ -142,47 +189,27 @@ def create_access_token(data: dict, expires_delta: timedelta | None = None):
     encoded_jwt = jwt.encode(to_encode, JWT_SECRET_KEY, algorithm=ALGORITHM)
     return encoded_jwt
 
-# --- NUEVO: Dependencia para OBTENER el usuario actual ---
+# --- Dependencia para OBTENER el usuario actual ---
 # Esta es la función que "protege" los endpoints
 async def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
-    """
-    Decodifica el token, valida al usuario y lo devuelve.
-    Si algo falla, lanza una excepción HTTP 401.
-    """
-    
-    print("\n--- DEBUG: INICIO DE get_current_user ---", flush=True)
-    print(f"DEBUG: Token recibido: {token[:20]}...", flush=True)
-    
+    # Simplificado para producción (menos logs, más velocidad)
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="No se pudieron validar las credenciales",
         headers={"WWW-Authenticate": "Bearer"},
     )
-    
     try:
         payload = jwt.decode(token, JWT_SECRET_KEY, algorithms=[ALGORITHM])
-        print(f"DEBUG: Payload decodificado: {payload}", flush=True)
-        
         username: str = payload.get("sub")
         if username is None:
-            print("DEBUG: ¡Error! 'sub' no está en el payload.", flush=True)
             raise credentials_exception
-        
-        print(f"DEBUG: Buscando en BD con sub: {username}", flush=True)
-        
-    except JWTError as e:
-        print(f"DEBUG: ¡Error! JWT.decode falló. ¿Clave secreta incorrecta? {e}", flush=True)
+    except JWTError:
         raise credentials_exception
     
     user = get_user_by_sub(db, sub_value=username)
-    print(f"DEBUG: Resultado de la BD: {user}", flush=True)
-    
     if user is None:
-        print("DEBUG: ¡Error! Usuario no encontrado en la BD.", flush=True)
         raise credentials_exception
     
-    print(f"DEBUG: Usuario autenticado: {user.username}", flush=True)
-    print("--- DEBUG: FIN DE get_current_user ---\n", flush=True)
     return user
 
 async def get_current_user_optional(
@@ -214,8 +241,9 @@ async def get_current_user_optional(
         return None
 
 # --- 5. ENDPOINTS ---
+# ==============================================================================
 
-# --- NUEVO: Endpoint de Login ---
+# --- Endpoint de Login ---
 @app.post("/api/users/login", response_model=Token)
 async def login_for_access_token(
     form_data: OAuth2PasswordRequestForm = Depends(), 
@@ -250,14 +278,13 @@ async def login_for_access_token(
 # --- RUTA DE PRUEBA DE SANIDAD ---
 @app.get("/api/hello")
 def get_hello():
-    return {"message": "¡El código SÍ se actualizó!"}
-# --- FIN DE RUTA DE PRUEBA ---
+    return {"message": "¡Conexión exitosa a TiDB desde Render!"}
 
 # --- ENDPOINT DE ARTÍCULOS (AHORA PROTEGIDO) ---
 @app.get("/api/articles", response_model=List[ArticleResponse])
 def get_all_articles(
     db: Session = Depends(get_db),
-    current_user: UserTable = Depends(get_current_user) # Correcto
+    current_user: UserTable = Depends(get_current_user) 
 ):
     """
     Endpoint PROTEGIDO para LEER todos los artículos.
