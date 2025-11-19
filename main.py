@@ -64,8 +64,8 @@ Base = declarative_base()
 
 # --- Configuración de Seguridad JWT ---
 
-# Intentamos leer con varios nombres comunes
-JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY") or os.getenv("SECRET_KEY")
+# Intentamos leer con TODOS los nombres posibles (incluido el de PHP: JWT_SECRET)
+JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY") or os.getenv("SECRET_KEY") or os.getenv("JWT_SECRET")
 
 # VALIDACIÓN CRÍTICA: Si después de intentar leerla sigue siendo None, detenemos todo.
 # Esto te ayudará a ver el error en los logs inmediatamente al arrancar.
