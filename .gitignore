@@ -1,0 +1,29 @@
+# Variables de entorno y secretos
+.env
+
+# Archivos compilados de Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Entornos virtuales
+venv/
+env/
+.venv/
+
+# Configuración de IDEs y Editores (VS Code, PyCharm, etc.)
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Archivos del sistema operativo
+.DS_Store
+Thumbs.db
+
+# Caché de herramientas (pytest, mypy, ruff, etc.)
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
