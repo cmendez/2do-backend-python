@@ -12,7 +12,12 @@ from sqlalchemy.orm import sessionmaker, Session
 from datetime import datetime, timedelta, timezone
 from jose import JWTError, jwt
 from passlib.context import CryptContext
-from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+from fastapi.security import (
+    HTTPAuthorizationCredentials,
+    HTTPBearer,
+    OAuth2PasswordBearer,
+    OAuth2PasswordRequestForm,
+)
 
 # Middleware de CORS
 from fastapi.middleware.cors import CORSMiddleware
@@ -89,6 +94,12 @@ pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 # Esquema de seguridad: le dice a FastAPI que busque un "Bearer Token"
 # en la URL /api/users/login (la crearemos más abajo)
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/users/login")
+internal_service_scheme = HTTPBearer(auto_error=False)
+
+PYTHON_SERVICE_SECRET = os.getenv("PYTHON_SERVICE_SECRET")
+PYTHON_SERVICE_ALGORITHM = "HS256"
+PYTHON_SERVICE_ISSUER = "php-api"
+PYTHON_SERVICE_AUDIENCE = "python-service"
 
 
 # ==============================================================================
@@ -254,6 +265,47 @@ async def get_current_user_optional(
     except JWTError:
         return None
 
+
+async def require_internal_service(
+    credentials: HTTPAuthorizationCredentials | None = Depends(
+        internal_service_scheme
+    ),
+):
+    """Authenticate calls made by the PHP backend to internal endpoints."""
+    if not PYTHON_SERVICE_SECRET:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Internal service authentication is not configured",
+        )
+
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Invalid service credentials",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+
+    if credentials is None or credentials.scheme.lower() != "bearer":
+        raise credentials_exception
+
+    try:
+        payload = jwt.decode(
+            credentials.credentials,
+            PYTHON_SERVICE_SECRET,
+            algorithms=[PYTHON_SERVICE_ALGORITHM],
+            audience=PYTHON_SERVICE_AUDIENCE,
+            issuer=PYTHON_SERVICE_ISSUER,
+        )
+    except JWTError:
+        raise credentials_exception
+
+    if payload.get("sub") != "php-service":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Service is not authorized",
+        )
+
+    return payload
+
 # --- 5. ENDPOINTS ---
 # ==============================================================================
 
@@ -308,3 +360,18 @@ def get_all_articles(
     
     articles = db.query(ArticleTable).all()
     return articles
+
+
+@app.get("/internal/articles", response_model=List[ArticleResponse])
+def get_all_articles_internal(
+    db: Session = Depends(get_db),
+    service_identity: dict = Depends(require_internal_service),
+):
+    """Internal version used to demonstrate PHP-to-Python communication."""
+    print(
+        "Petición interna recibida desde "
+        f"{service_identity.get('sub', 'unknown-service')}.",
+        flush=True,
+    )
+
+    return db.query(ArticleTable).all()
