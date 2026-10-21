@@ -16,6 +16,8 @@ services:
     # Carga las variables del archivo .env
     env_file:
       - .env
+    environment:
+      - PYTHON_SERVICE_SECRET=${PYTHON_SERVICE_SECRET:-local-development-service-secret}
       
     # ¡LA MAGIA!
     # Esto añade "host.docker.internal" al DNS del contenedor
